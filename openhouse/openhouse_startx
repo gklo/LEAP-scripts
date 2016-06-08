@@ -1,0 +1,4 @@
+#!/bin/sh
+
+Xephyr -br -ac -resizeable -noreset -screen 1600x900 :3 &
+DISPLAY=:3 ssh -XYC root@s5 $1

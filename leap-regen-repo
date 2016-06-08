@@ -1,0 +1,11 @@
+#!/bin/sh
+
+if [ -z "$LEAPTAG" ]; then
+    >&2 echo "Please specify your target by running: export LEAPTAG=<DIST_TAG>."
+    exit 1
+fi
+
+TAG=$LEAPTAG
+
+koji regen-repo $TAG
+koji regen-repo ${TAG}-build

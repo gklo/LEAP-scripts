@@ -1,0 +1,124 @@
+#!/bin/sh
+
+#
+# This script automates downloading latest srpms from EPEL repository, filtering and building them on LEAP Koji
+#
+
+EPELURL='rsync://dl.fedoraproject.org/fedora-epel/7/SRPMS'
+ROOTDIR="$HOME/leap-epel"
+DLDIR="$ROOTDIR/allpkgs"
+WORKDIR="$ROOTDIR/build-$(date +%Y%m%d-%H%M%S)"
+TMPDIR="/var/tmp/$(basename $0)-$$"
+
+DISTTAG="lp7-extra-candidate"
+DATEFORMAT='%F %T'
+
+for cmd in rsync rpm rpmdev-vercmp koji; do
+    command -v $cmd >/dev/null 2>&1 || { echo >&2 "Command $cmd is not found.  Aborting."; exit 1; }
+done
+
+# Check if the package exist on addon repository
+check_duplicate_addon () {
+    PKGFILE=$1
+    PKGNAME="$(rpm --qf='%{name}' -qp $PKGFILE 2>/dev/null)"
+    echo "[$(date +"$DATEFORMAT")] Checking if $PKGNAME already exists in addon repo ..."
+    if [ "$(koji list-tagged --quiet --latest lp7-addon $PKGNAME | wc -l)" -gt 0 ] || \
+       [ "$(koji list-tagged --quiet --latest lp7-addon-updates $PKGNAME | wc -l)" -gt 0 ] || \
+       [ "$(koji list-tagged --quiet --latest lp7-addon-updates-candidate $PKGNAME | wc -l)" -gt 0 ]
+    then    
+        echo "$PKGNAME" >> $ROOTDIR/blacklist
+        return 0
+    fi
+    return 1
+}
+
+# Check if the package exist on local EPEL repository
+check_duplicate () {
+    PKGFILE=$1
+    PKGNAME="$(rpm --qf='%{name}' -qp $PKGFILE 2>/dev/null)"
+    PKGNVR="$(rpm --qf='%{nvr}' -qp $PKGFILE 2>/dev/null | sed "s/el7_1\|el7/lp7/")"
+    PKGNVR_KOJI="$(koji list-tagged --quiet --latest lp7-extra $PKGNAME | cut -d\  -f1)"
+    [ -z $PKGNVR_KOJI ] && PKGNVR_KOJI="$(koji list-tagged --quiet --latest lp7-extra-candidate $PKGNAME | cut -d\  -f1)"
+
+    echo "[$(date +"$DATEFORMAT")] Checking if newer version of $PKGNAME exists on koji ..."
+    echo "LOCAL: $PKGNVR"
+    echo "KOJI:  $PKGNVR_KOJI"
+
+    if [ -z $PKGNVR_KOJI ]; then
+        echo "$PKGNAME is not found on Koji"
+        return 1
+    else
+        rpmdev-vercmp $PKGNVR $NVR_KOJI
+        RESULT=$?
+        if [ $RESULT -eq 12 ] || [ $RESULT -eq 0 ]; then
+            return 0
+        elif koji buildinfo $NVR | grep -q COMPLETE; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+}
+
+# Repack srpms for LEAP
+repack_rpms () {
+    echo "[$(date +"$DATEFORMAT")] Start repacking packages ..."
+    mkdir -p $WORKDIR/repacked
+
+    for RPM in *.src.rpm; do
+        NAME=$(rpm --qf='%{name}' -qp $RPM 2>/dev/null)
+        echo "[$(date +"$DATEFORMAT")] Repacking $(basename $RPM) ..."
+        mkdir -p $TMPDIR/rpmbuild/{BUILD,BUILDROOT,SOURCES,SPECS,SRPMS,RPMS}
+
+        rpm -D "_topdir $TMPDIR/rpmbuild" -i $RPM 2>/dev/null
+        rpmbuild -D "_topdir $TMPDIR/rpmbuild" -bs $TMPDIR/rpmbuild/SPECS/*.spec 2>/dev/null
+
+        cp $TMPDIR/rpmbuild/SRPMS/*.src.rpm $WORKDIR/repacked
+        rm -rf $TMPDIR/rpmbuild
+    done
+}
+
+# Submit build tasks to Koji
+build_rpms () {
+    for RPM in *.src.rpm; do
+        echo "[$(date +"$DATEFORMAT")] Adding $(rpm --qf='%{name}' -qp $RPM 2>/dev/null) to Koji ..."
+        koji add-pkg --owner=$(whoami) $DISTTAG $(rpm --qf='%{name}' -qp $RPM 2>/dev/null)
+        echo "[$(date +"$DATEFORMAT")] Sending $RPM to Koji ..."
+        koji build --noprogress --background $DISTTAG $RPM | tee $RPM.koji 
+    done
+}
+
+#if [ ! -d $ROOTDIR ]; then
+    #mkdir -p $DLDIR $WORKDIR
+    mkdir -p $WORKDIR
+    {
+        exec 2>&1
+
+        #echo "[$(date +"$DATEFORMAT")] Start syncing EPEL repo ..."
+        #rsync -avzhH $EPELURL/* $DLDIR/
+
+        mkdir -p $WORKDIR/original/{pending,skipped,passed}
+
+        echo "[$(date +"$DATEFORMAT")] Creating symlinks ..."
+        cd $WORKDIR/original/pending
+        find "$DLDIR" -name *.src.rpm | while read RPM; do
+            ln -s "$(readlink -f $RPM)" ./ > /dev/null 2>&1
+        done
+
+        echo "[$(date +"$DATEFORMAT")] Start filtering packages ..."
+        for RPM in *.src.rpm; do
+            if check_duplicate_addon $RPM || check_duplicate $RPM; then
+                mv $RPM ../skipped
+                continue
+            else
+                mv $RPM ../passed
+            fi
+        done
+
+        cd $WORKDIR/original/passed
+        repack_rpms
+
+        cd $WORKDIR/repacked
+        build_rpms
+    } | cat -v | tee $WORKDIR/leap-epel.log
+#fi

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+TARGET_TAG="$1"
+
+if [ -z ${TARGET_TAG} ]; then
+	echo "Usage: $(basename $0) <tag>"
+	exit 1
+fi
+
+case "${TARGET_TAG}" in
+	lp7-updates) : ;;
+	lp7-addon-updates) : ;;
+	*)
+		echo "Invalid tag."
+		exit 1
+		;;
+esac
+
+echo "Adding pkgs to ${TARGET_TAG} ..."
+koji list-pkgs --quiet --tag=${TARGET_TAG}-candidate \
+| cut -d" " -f1 \
+| while read tag; do koji add-pkg --owner=buildbot ${TARGET_TAG} $tag; done
+
+echo "Tagging packages to ${TARGET_TAG}  ..."
+koji list-tagged --quiet ${TARGET_TAG}-candidate \
+| cut -d" " -f1 \
+| while read nvr; do koji tag-build ${TARGET_TAG} $nvr; done
+
+echo "Untagging packages from ${TARGET_TAG}-candidate ..."
+koji list-tagged --quiet ${TARGET_TAG}-candidate \
+| cut -d" " -f1 \
+| while read nvr; do koji untag-build ${TARGET_TAG}-candidate $nvr; done

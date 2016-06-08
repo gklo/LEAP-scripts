@@ -1,0 +1,66 @@
+---
+- hosts: builders
+  remote_user: root
+  tasks:
+    - name: copy hosts file
+      synchronize:
+        src: /etc/hosts
+        dest: /etc/hosts
+      remote_user: xxxx
+      delegate_to: x.x.x.x
+
+    - name: keep system up to date
+      yum: name=* state=latest
+
+    - name: install ntp
+      yum: name=ntp state=latest
+      notify:
+        restart ntp
+
+    - name: install koji-builder
+      yum: name=koji-builder state=present
+
+    - name: create /etc/pki/koji
+      file: dest=/etc/pki/koji mode=0755 owner=root group=root state=directory
+
+    - name: generate koji certificates
+      local_action: command /etc/pki/koji/auto_mkkojiclientcert {{ inventory_hostname }}
+      ignore_errors: yes
+
+    - name: copy koji host cert to the node
+      copy: src=/etc/pki/koji/{{ inventory_hostname }}.pem dest=/etc/pki/koji/{{ inventory_hostname }}.pem owner=root group=root mode=0775
+
+    - name: copy koji ca cert to the node
+      copy: src=/etc/pki/koji/koji_ca_cert.crt dest=/etc/pki/koji/koji_ca_cert.crt owner=root group=root mode=0775
+
+    - name: symlink client cert
+      file: path=/etc/kojid/client.crt src=/etc/pki/koji/{{ inventory_hostname }}.pem state=link
+
+    - name: symlink client ca cert
+      file: path=/etc/kojid/clientca.crt src=/etc/pki/koji/koji_ca_cert.crt state=link
+
+    - name: symlink server ca cert
+      file: path=/etc/kojid/serverca.crt src=/etc/pki/koji/koji_ca_cert.crt state=link
+
+    - name: set koji-hub link in kojid.conf
+      lineinfile: dest=/etc/kojid/kojid.conf regexp='^server=' line='server=http://172.16.172.4/kojihub' state=present
+
+    - name: set koji files link in kojid.conf
+      lineinfile: dest=/etc/kojid/kojid.conf regexp='^topurl=' line='topurl=http://172.16.172.4/kojifiles' state=present
+
+    - name: set workdir to /var/tmp/koji
+      lineinfile: dest=/etc/kojid/kojid.conf regexp='workdir=' line='workdir=/var/tmp/koji' state=present
+
+    - name: set sleeptime to 0
+      lineinfile: dest=/etc/kojid/kojid.conf regexp='sleeptime=' line='sleeptime=0' state=present
+
+      notify:
+        restart kojid
+
+  handlers:
+    - name: restart ntp
+      service: name=ntpd state=restarted
+
+    - name: restart kojid
+      service: name=kojid state=restarted
+      ignore_errors: yes

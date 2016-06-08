@@ -1,0 +1,54 @@
+#!/bin/bash
+
+set -o errexit
+set -o nounset
+
+APP_NAME="$(basename $0)"
+TEMP_DIR="/var/tmp/${APP_NAME}-$$"
+SRC_DIR="/mnt/koji/other/centos/updates"
+DEST_DIR="./${APP_NAME}-result-$$"
+NUM=0
+NUM_TOTAL=$(ls -l ${SRC_DIR}/*.src.rpm | wc -l)
+
+cleanup() {
+    echo -e "\nUser terminated ... Cleaning up now ..."
+    rm -rf ${TEMP_DIR}
+    exit 1
+}
+
+trap cleanup SIGINT SIGTERM SIGHUP
+
+if [ ! -e ~/.rpmmacros ]; then
+    echo "~/.rpmmacros doesn't exist!"
+    exit 1
+fi
+
+mkdir -p ${TEMP_DIR}
+mkdir -p ${DEST_DIR}/{repacked,skipped}
+
+time {
+for RPM in ${SRC_DIR}/*.src.rpm
+do
+    NUM=$((${NUM}+1))
+    NAME=$(rpm --qf='%{name}' -qp ${RPM} 2>/dev/null)
+
+    ### Skip packages that contain CentOS branding ###
+    if grep -q "\.centos\." <<< $(basename ${RPM}); then
+        echo "########## Skipping $(basename ${RPM}) (${NUM}/${NUM_TOTAL})"
+        cp ${RPM} ${DEST_DIR}/skipped
+    else
+        echo "########## Repacking $(basename ${RPM}) (${NUM}/${NUM_TOTAL}) ..."
+        mkdir -p ${TEMP_DIR}/rpmbuild/{BUILD,BUILDROOT,SOURCES,SPECS,SRPMS,RPMS}
+
+        rpm -D "_topdir ${TEMP_DIR}/rpmbuild" -i ${RPM} 2>/dev/null
+        rpmbuild -D "_topdir ${TEMP_DIR}/rpmbuild" -bs ${TEMP_DIR}/rpmbuild/SPECS/${NAME}.spec 2>/dev/null
+
+        cp ${TEMP_DIR}/rpmbuild/SRPMS/*.src.rpm ${DEST_DIR}/repacked
+        rm -rf ${TEMP_DIR}/rpmbuild
+    fi
+done
+echo "Repack completed. Cleaning up ..."
+rm -rf ${TEMP_DIR}
+echo "Repacked srpms are located in ${DEST_DIR}"
+
+} | cat -v | tee ${DEST_DIR}/${APP_NAME}.log

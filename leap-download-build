@@ -1,0 +1,17 @@
+#!/bin/sh
+
+NAME=$1
+TAG1=lp7-updates
+TAG2=lp7
+
+SRCRPM="$((koji download-build --arch=src --latestfrom=$TAG1 $NAME 2>&1 || \
+    koji download-build --arch=src --latestfrom=$TAG2 $NAME 2>&1) | \
+    cat -v | tail -n 1 | cut -f1 -d' ' | sed 's/\^M//g')"
+
+if ! grep -q src.rpm\$ <<< $SRCRPM; then
+    echo "Error: Invlid package name or no build found for this package" >&2
+    exit 1
+else
+    rpmdev-extract ./$SRCRPM
+fi
+

@@ -1,0 +1,271 @@
+#!/bin/bash
+
+#
+# This script automates downloading latest srpms from CentOS repository, filtering and building them on LEAP Koji
+#
+
+for cmd in rpm rpmdev-sort koji curl; do
+    command -v $cmd >/dev/null 2>&1 || { echo >&2 "Command $cmd not found.  Aborting."; exit 1; }
+done
+
+ROOTDIR="$HOME/leap-updates"
+DLDIR="$ROOTDIR/allpkgs"
+WORKDIR="$ROOTDIR/build-$(date +%Y%m%d-%H%M%S)"
+TMPDIR="/var/tmp/$(basename $0)-$$"
+TAG="lp7-updates"
+DIST="lp7"
+#URL="http://vault.centos.org/centos/7.1.1503/updates/Source/SPackages"
+URL="http://vault.centos.org/7.2.1511/os/Source/SPackages"
+RPMLIST="$(curl --silent "$URL/" | grep -Po '(?<=href\=\").*?\.rpm(?=\")' | sort)"
+# list of packages which should not be replaced
+BLOCKLIST="binutils kernel"
+# Skip all branded packages
+SKIPLIST="centos"
+
+wrap_up () {
+    rm -rf $TMPDIR
+    exit 0
+}
+
+# Verify the number of packages downloaded
+verify_dl () {
+    if [ "$(ls *.src.rpm | wc -l )" != "$(echo $NEW_RPMLIST | wc -w)" ]; then
+        echo "$(ls *.src.rpm | wc -l ) vs $(echo $NEW_RPMLIST | wc -w)"
+        return 1
+    fi
+    return 0
+}
+
+# check if the package on the SKIPLIST
+check_skiplist () {
+    RPMFILE=$1
+    for SKIPITEM in $SKIPLIST; do
+        #echo "Checking if file name contains $SKIPITEM ..."
+        if grep -q $SKIPITEM <<< $RPMFILE; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# check if the package on the BLOCKLIST
+check_blocklist () {
+    RPMFILE=$1
+    for BLOCKITEM in $BLOCKLIST; do
+        #echo "Checking if file name contains $BLOCKITEM ..."
+        if grep -q $BLOCKITEM <<< $RPMFILE; then
+           return 0
+        fi
+    done
+    return 1
+}
+
+# check packages if they already exist on Koji
+check_build () {
+    RPMFILE=$1
+    NVR="$(rpm --qf='%{nvr}\n' -qp $RPMFILE 2>/dev/null | sed "s/el7_1\|el7/${DIST}/" | sed "s/.centos.\([0-9]\+\)/.\1.leap/" )"
+    NVR_KOJI="$(koji list-tagged --quiet --latest ${TAG}-candidate $PKGNAME | cut -d\  -f1)"
+    [ -z "${NVR_KOJI// }" ] && NVR_KOJI="$(koji list-tagged --quiet --latest ${TAG} $PKGNAME | cut -d\  -f1)"
+
+    if [ -z "${NVR_KOJI// }" ]; then
+        echo "No version found on Koji"
+        return 1
+    else
+        echo "Comparing $NVR and $NVR_KOJI on koji ..."
+        rpmdev-vercmp $NVR $NVR_KOJI
+        CMP_RESULT=$?
+        if [ $CMP_RESULT -eq 12 ] || [ $CMP_RESULT -eq 0 ]; then
+            return 0
+	# workaround
+        elif koji buildinfo $NVR | grep -q COMPLETE; then
+            return 0
+	else
+            return 1
+        fi
+    fi
+}
+
+# Only keep the latest version of each package
+filter_oldver () {
+    # Name list of packages that have multiple versions of rpm
+    PKGLIST="$(rpm -qp --qf='%{name}\n' *.src.rpm 2>/dev/null | uniq -d)"
+
+    # keep only the latest rpms in the current directory
+    if [ ! -z "$PKGLIST" ]; then
+        for PKG in $PKGLIST; do
+            echo "Removing old versions of $PKG ..."
+            OLDRPMS="$(ls | grep "$PKG-[0-9].*" | rpmdev-sort | head -n -1)"
+            mv $OLDRPMS $WORKDIR/original/oldver
+        done
+    fi
+}
+
+# Repack srpm for LEAP 
+repack_rpms () {
+    echo -e "\nStart repacking passed rpms ..."
+
+    mkdir $WORKDIR/repacked
+
+    for RPM in *.src.rpm; do
+        NAME=$(rpm --qf='%{name}' -qp ${RPM} 2>/dev/null)
+        echo -e "Repacking $(basename $RPM) ..."
+        mkdir -p $TMPDIR/rpmbuild/{BUILD,BUILDROOT,SOURCES,SPECS,SRPMS,RPMS}
+
+        rpm -D "_topdir $TMPDIR/rpmbuild" -i $RPM 2>/dev/null
+        rpmbuild -D "_topdir $TMPDIR/rpmbuild" -bs $TMPDIR/rpmbuild/SPECS/*.spec 2>/dev/null
+
+        cp $TMPDIR/rpmbuild/SRPMS/*.src.rpm $WORKDIR/repacked
+        rm -rf $TMPDIR/rpmbuild
+    done
+}
+
+# Submit build tasks to Koji
+build_rpms () {
+    for RPM in *.src.rpm; do
+        NAME="$(rpm --qf='%{name}' -qp $RPM 2>/dev/null)"
+        koji add-pkg --owner=$(whoami) $TAG-candidate $NAME
+        koji build --noprogress --background $TAG-candidate $RPM | tee ${RPM}.koji
+    done
+}
+
+if [ ! -d $ROOTDIR ]; then
+    echo "Creating $DLDIR ..."
+    mkdir -p $DLDIR
+    cd $DLDIR
+
+    echo "Downloading all RPMs ..."
+    for RPM in $RPMLIST; do
+        echo "Downloading $RPM ..."
+        wget "$URL/$RPM"
+    done
+
+    # Verify rpms
+    echo "Verifying RPMs ..."
+    NEW_RPMLIST=$RPMLIST
+    if ! verify_dl; then
+        wrap_up
+    fi
+
+    cd $DLDIR
+    echo "Creating folder structure $WORKDIR ..."
+    mkdir -p $WORKDIR/original/{pending,oldver,passed,skipped,blocked,existed}
+
+    echo "Creating symlinks ..."
+    cd $WORKDIR/original/pending
+    for RPM in $DLDIR/*.src.rpm; do
+        ln -s "$(readlink -f $RPM)" ./ > /dev/null 2>&1
+    done
+
+    echo "Filtering old versions ..."
+    filter_oldver
+    
+    echo "Filtering RPMs ..."
+    for RPMFILE in *.src.rpm; do
+        PKGNAME="$(rpm --qf='%{name}\n' -qp $RPMFILE 2>/dev/null)"
+
+        echo "Package name: $PKGNAME"
+
+        echo "Checking if same or newer build exist on Koji ..."
+        if check_build $RPMFILE; then
+            echo "$RPMFILE goes to existed"
+            mv $RPMFILE ../existed
+            continue
+        elif check_skiplist $RPMFILE; then
+            echo "$RPMFILE goes to skipped"
+            mv $RPMFILE ../skipped
+            continue
+        elif check_blocklist $RPMFILE; then
+            echo "$RPMFILE goes to blocked"
+            mv $RPMFILE ../blocked
+            continue
+        else
+            echo "$RPMFILE goes to passed!"
+            mv $RPMFILE ../passed
+        fi
+    done
+
+    cd $WORKDIR/original/passed
+    repack_rpms
+
+    cd $WORKDIR/repacked
+    build_rpms
+
+    wrap_up
+else
+    # Make a list of rpm to download
+    LOCAL_RPMLIST="$(ls $DLDIR | sort)"
+    NEW_RPMLIST="$(comm -3 <(echo "$RPMLIST") <(echo "$LOCAL_RPMLIST") | sort | sed '/^\t/d')"
+
+    if [ -z "$NEW_RPMLIST" ]; then
+        echo "No new packages found."
+        wrap_up
+    fi
+
+    # Create tmp folder
+    echo "Creating $TMPDIR ..."
+    mkdir -p $TMPDIR
+    cd $TMPDIR
+
+    # Download rpms
+    for RPM in $NEW_RPMLIST
+    do
+        echo "Downloading $RPM ..."
+        wget "$URL/$RPM"
+    done
+
+    # Verify rpms
+    echo "Verifying RPMs ..."
+    if ! verify_dl; then
+        wrap_up
+    fi
+
+    # copy back to DLDIR for backup
+    echo "Copying RPMS to $DLDIR ..."
+    cp -a *.src.rpm $DLDIR
+
+    mkdir -p $WORKDIR/original/{pending,oldver,passed,skipped,blocked,existed}
+
+    cd $WORKDIR/original/pending
+    for RPMNAME in $NEW_RPMLIST; do
+        ln -s $DLDIR/$RPMNAME ./
+    done
+
+    echo "Filtering older versions ..."
+    filter_oldver
+
+    # filter rpms
+    echo "Filtering RPMs ..."
+    for RPMFILE in *.src.rpm; do
+        PKGNAME="$(rpm --qf='%{name}\n' -qp $RPMFILE 2>/dev/null)"
+
+        echo "Package name: $PKGNAME"
+
+        echo "Checking if same or newer build exists on Koji ..."
+        if check_build $RPMFILE; then
+            echo "$RPMFILE goes to existed"
+            mv $RPMFILE ../existed  
+            continue
+        elif check_skiplist $RPMFILE; then
+            echo "$RPMFILE goes to skipped"
+            mv $RPMFILE ../skipped  
+            continue
+        elif check_blocklist $RPMFILE; then
+            echo "$RPMFILE goes to blocked"
+            mv $RPMFILE ../blocked  
+            continue
+        else
+            echo "$RPMFILE goes to passed!"
+            mv $RPMFILE ../passed  
+        fi
+    done
+
+    cd $WORKDIR/original/passed
+    repack_rpms
+
+    cd $WORKDIR/repacked
+    build_rpms
+
+    wrap_up
+fi
+
+

@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+
+DISTNAME=leap
+RELEASE=lp7
+DATE=$(date +%Y%m%d)
+TIME=$(date +%H%M%S)
+SUFFIX="$DATE"
+BASEDIR=/mnt/koji/mash${RELEASE}
+ENABLElp7=0
+ENABLElp7u=1
+ENABLElp7a=0
+ENABLElp7au=1
+
+# If there is already a compose output directory for today,
+# append -HHMMSS
+if [ -d ${BASEDIR}/${DISTNAME}-${RELEASE}-$SUFFIX ] || \
+    [ -d ${BASEDIR}/${DISTNAME}-${RELEASE}-updates-$SUFFIX ] || \
+    [ -d ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-$SUFFIX ] || \
+    [ -d ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-updates-$SUFFIX ] # If YYYYMMDD exists, add -HHMMSS
+then
+        SUFFIX=${SUFFIX}-${TIME}
+fi
+
+# Default mash output dir is unique by dates (YYYYMMDD)
+[ $ENABLElp7 -eq 1 ] && MASHDIR=${BASEDIR}/${DISTNAME}-${RELEASE}-$SUFFIX
+[ $ENABLElp7u -eq 1 ] && MASHDIRu=${BASEDIR}/${DISTNAME}-${RELEASE}-updates-$SUFFIX
+[ $ENABLElp7a -eq 1 ] && MASHDIRa=${BASEDIR}/${DISTNAME}-${RELEASE}-addon-$SUFFIX
+[ $ENABLElp7au -eq 1 ] && MASHDIRau=${BASEDIR}/${DISTNAME}-${RELEASE}-addon-updates-$SUFFIX
+
+[ $ENABLElp7 -eq 1 ] && mkdir -p ${BASEDIR}/${DISTNAME}-${RELEASE}-$SUFFIX
+[ $ENABLElp7u -eq 1 ] && mkdir -p ${BASEDIR}/${DISTNAME}-${RELEASE}-updates-$SUFFIX
+[ $ENABLElp7a -eq 1 ] && mkdir -p ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-$SUFFIX
+[ $ENABLElp7au -eq 1 ] && mkdir -p ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-updates-$SUFFIX
+
+{
+
+exec 2>&1
+
+echo "Composing to ${MASHDIR}..."
+[ $ENABLElp7 -eq 1 ] && time mash -o ${MASHDIR} ${DISTNAME}-${RELEASE} -f /usr/local/mash/comps-${DISTNAME}-${RELEASE}.xml
+echo "Composing to ${MASHDIRu}..."
+[ $ENABLElp7u -eq 1 ] && time mash -o ${MASHDIRu} ${DISTNAME}-${RELEASE}-updates -f /usr/local/mash/comps-${DISTNAME}-${RELEASE}.xml
+echo "Composing to ${MASHDIRa}..."
+[ $ENABLElp7a -eq 1 ] && time mash -o ${MASHDIRa} ${DISTNAME}-${RELEASE}-addon -f /usr/local/mash/comps-${DISTNAME}-${RELEASE}.xml
+echo "Composing to ${MASHDIRau}..."
+[ $ENABLElp7au -eq 1 ] && time mash -o ${MASHDIRau} ${DISTNAME}-${RELEASE}-addon-updates -f /usr/local/mash/comps-${DISTNAME}-${RELEASE}.xml
+
+
+[ $ENABLElp7 -eq 1 ] && rm ${BASEDIR}/${DISTNAME}-${RELEASE}-latest
+[ $ENABLElp7u -eq 1 ] && rm ${BASEDIR}/${DISTNAME}-${RELEASE}-updates-latest
+[ $ENABLElp7a -eq 1 ] && rm ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-latest
+[ $ENABLElp7au -eq 1 ] && rm ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-updates-latest
+[ $ENABLElp7 -eq 1 ] && ln -s $(basename ${MASHDIR}) ${BASEDIR}/${DISTNAME}-${RELEASE}-latest
+[ $ENABLElp7u -eq 1 ] && ln -s $(basename ${MASHDIRu}) ${BASEDIR}/${DISTNAME}-${RELEASE}-updates-latest
+[ $ENABLElp7a -eq 1 ] && ln -s $(basename ${MASHDIRa}) ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-latest
+[ $ENABLElp7au -eq 1 ] && ln -s $(basename ${MASHDIRau}) ${BASEDIR}/${DISTNAME}-${RELEASE}-addon-updates-latest
+
+echo
+echo "Warnings about unsigned packages are temporarily suppressed from email."
+echo "Refer to ${MASHDIR}/mash.log for warnings."
+
+}| cat -v | tee ${MASHDIRu}/mash.log | fgrep -v '(signed with no key)' #mail -s "${DISTNAME}-${RELEASE} Mash Run" mashrun-alert
+
+# The 'cat -v' above is there to prevent an unprintable code from throwing off the
+# mail command.

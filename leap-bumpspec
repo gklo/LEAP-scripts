@@ -1,0 +1,10 @@
+#!/bin/sh
+
+RPM_PACKAGER="Glaser Lo <glaser-king-san.lo@senecacollege.ca>"
+
+if grep -q '^Release.*leap' $1; then
+    rpmdev-bumpspec -u "$RPM_PACKAGER" -r "$@"
+else
+    rpmdev-bumpspec -u "$RPM_PACKAGER" -s leap "$@"
+    sed -i '/^\(\*\|Release\)/ s/leap1/leap/' $1
+fi

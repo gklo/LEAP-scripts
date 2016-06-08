@@ -1,0 +1,27 @@
+#!/bin/sh
+
+if [ -z "$LEAPTAG" ]; then
+    >&2 echo "Please specify your target by running: export LEAPTAG=<DIST_TAG>."
+    exit 1
+fi
+
+if ! grep -q \.spec\$ <<< $1; then
+    >&2 echo "Usage: $(basename $0) <SPEC file>"
+    exit 1
+fi
+
+TAG=$LEAPTAG
+NAME=$(rpmspec -q --qf="%{name}\n" $1  | head -n 1)
+SRCRPM=$(rpmspec -q --qf='%{nvr}\n' $1 | head -n 1).src.rpm
+
+echo "Checking if the package is on the pkg list ..."
+if ! koji list-pkgs --tag=$TAG --package=$NAME --quiet; then
+    echo "Package is not found on the pkg list, adding it ..."
+    koji add-pkg --owner=$(whoami) $TAG $NAME
+else
+    echo "Package is already on the pkg list."
+fi
+
+echo "Generating source rpm for $1..."
+rpmbuild -bs $1
+koji build $TAG ~/rpmbuild/SRPMS/$SRCRPM
